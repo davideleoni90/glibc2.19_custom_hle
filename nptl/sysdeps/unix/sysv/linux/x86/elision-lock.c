@@ -24,7 +24,7 @@
 //(dleoni) temp include to print debug messages
 #include <stdlib.h>
 #include <stdio.h>
-
+#include <time.h>
 
 #if !defined(LLL_LOCK) && !defined(EXTRAARG)
 /* Make sure the configuration code is always linked in for static
@@ -113,5 +113,12 @@ __lll_lock_elision (int *futex, short *adapt_count, EXTRAARG int private)
     }
 
   /* Use a normal lock here.  */
-  return LLL_LOCK ((*futex), private);
+  // (dleoni) keep track of the time needed to acquire the lock
+  struct timeval before, after;
+  gettimeofday(&before, NULL);
+  LLL_LOCK ((*futex), private);
+  gettimeofday(&before, NULL);
+  printf("LOCK %p TIME %f\n", futex, (float) after.tv_usec-before.tv_usec);
+  fflush(stdout);
+  return 0;
 }
