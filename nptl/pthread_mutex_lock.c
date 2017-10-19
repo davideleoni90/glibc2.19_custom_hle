@@ -24,6 +24,79 @@
 #include "pthreadP.h"
 #include <lowlevellock.h>
 #include <stap-probe.h>
+// (dleoni) Include to implement the data structure to track the contention of mutexes
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <time.h>
+
+// (dleoni) The structure representing an element in the table
+// key: address of the mutex
+// data: total time to acquire the mutex (in milliseconds)
+struct DataItem {
+   double mutex_contention;   
+   pthread_mutex_t* mutex_address;
+};
+
+#define MAX_NUMBER_MUTEXES 50000
+
+struct DataItem* hashArray[MAX_NUMBER_MUTEXES]; 
+struct DataItem* item;
+int number_of_mutexes;
+
+// (dleoni) Insert a new item in the first empty spot
+static void insertMutex(pthread_mutex_t *address, double contention) {
+
+   struct DataItem *item = (struct DataItem*) malloc(sizeof(struct DataItem));
+   item->mutex_contention = contention;  
+   item->mutex_address = address;
+
+   int index = 0;   
+
+   //put in the first available spot: if not found, don't add
+   while(index < MAX_NUMBER_MUTEXES) {
+      
+      if(hashArray[index] == NULL) {
+         hashArray[index] = item;
+         number_of_mutexes = index+1;
+         return;
+      }
+
+      //go to next cell
+      ++index;
+   }
+   
+   printf("CANNOT ADD MUTEX\n");
+   fflush(stdout);	
+}
+
+// (dleoni) Search for the item in the table corresponding to the given key (i.e. the address of the mutex): if found, return the index, otherwise return -1
+
+static int searchMutex(pthread_mutex_t *key) {
+
+   int index = 0;
+   while(index < number_of_mutexes) {
+      if(hashArray[index]->mutex_address == key) {
+          return index;
+      }
+      index++;
+   }
+   return -1; 
+
+}
+
+
+// (dleoni) Show statistics about mutexes
+static void showMutexes() {
+   
+   int index = 0;
+   while(index < number_of_mutexes) {
+      printf("MUTEX:%p; CONTENTION:%f\n", hashArray[index]->mutex_address, hashArray[index]->mutex_contention);
+      fflush(stdout);
+      index++;
+   }
+}
 
 #ifndef lll_lock_elision
 #define lll_lock_elision(lock, try_lock, private)	({ \
@@ -76,7 +149,20 @@ __pthread_mutex_lock (mutex)
       FORCE_ELISION (mutex, goto elision);
     simple:
       /* Normal mutex.  */
+      printf("CUSTOM MUTEX\n");
+      fflush(stdout);
+      struct timespec start, stop;
+      clock_gettime( CLOCK_REALTIME, &start);
       LLL_MUTEX_LOCK (mutex);
+      clock_gettime( CLOCK_REALTIME, &stop);
+      double mutex_acquisition = ((stop.tv_sec - start.tv_sec) + (stop.tv_nsec - start.tv_nsec) / 1000000000L) * 1000000L;
+      int index = searchMutex(mutex);
+      if(index == -1) {
+         insertMutex(mutex, mutex_acquisition);
+      }
+      else {
+         hashArray[index]->mutex_contention += mutex_acquisition;
+      }
       assert (mutex->__data.__owner == 0);
     }
 #ifdef HAVE_ELISION
