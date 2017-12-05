@@ -11,7 +11,6 @@
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
    Lesser General Public License for more details.
-
    You should have received a copy of the GNU Lesser General Public
    License along with the GNU C Library; if not, see
    <http://www.gnu.org/licenses/>.  */
@@ -30,73 +29,99 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <time.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
-// (dleoni) The structure representing an element in the table
-// key: address of the mutex
-// data: total time to acquire the mutex (in milliseconds)
-struct DataItem {
-   double mutex_contention;   
-   pthread_mutex_t* mutex_address;
-};
-
-#define MAX_NUMBER_MUTEXES 50000
+// (dleoni) Include to print the backtrace
+#include <execinfo.h>
 
 struct DataItem* hashArray[MAX_NUMBER_MUTEXES]; 
-struct DataItem* item;
-int number_of_mutexes;
+int number_of_collisions;
 
-// (dleoni) Insert a new item in the first empty spot
-static void insertMutex(pthread_mutex_t *address, double contention) {
+// (dleoni) The boolean variable to decide whether the contetion of mutexes shoud be measured
+bool measure_mutexes_contention;
 
-   struct DataItem *item = (struct DataItem*) malloc(sizeof(struct DataItem));
-   item->mutex_contention = contention;  
-   item->mutex_address = address;
-
-   int index = 0;   
-
-   //put in the first available spot: if not found, don't add
-   while(index < MAX_NUMBER_MUTEXES) {
-      
-      if(hashArray[index] == NULL) {
-         hashArray[index] = item;
-         number_of_mutexes = index+1;
-         return;
-      }
-
-      //go to next cell
-      ++index;
-   }
-   
-   printf("CANNOT ADD MUTEX\n");
-   fflush(stdout);	
-}
-
-// (dleoni) Search for the item in the table corresponding to the given key (i.e. the address of the mutex): if found, return the index, otherwise return -1
-
-static int searchMutex(pthread_mutex_t *key) {
-
-   int index = 0;
-   while(index < number_of_mutexes) {
-      if(hashArray[index]->mutex_address == key) {
-          return index;
-      }
-      index++;
-   }
-   return -1; 
-
-}
+#define BT_BUF_SIZE 20
+// (dleoni) Vectors of last addresses in the backtrace
+static __thread void *buffer[BT_BUF_SIZE];
 
 
-// (dleoni) Show statistics about mutexes
-static void showMutexes() {
-   
-   int index = 0;
-   while(index < number_of_mutexes) {
-      printf("MUTEX:%p; CONTENTION:%f\n", hashArray[index]->mutex_address, hashArray[index]->mutex_contention);
+// (dleoni) Vectors of strings corresponding to the addresses in the backtrace
+static __thread char **strings;
+
+
+// (dleoni) Get backtrace
+static void getBacktrace() {
+//static void getBacktrace(struct DataItem *item) {
+   int addresses,j;
+   addresses = backtrace(buffer, BT_BUF_SIZE);
+   strings = backtrace_symbols(buffer, addresses);
+   if (strings == NULL) {
+      printf("ERROR!!!\n");
       fflush(stdout);
-      index++;
    }
+   for (j = 0; j < addresses; j++)
+      printf("%s\n", strings[j]);
+      fflush(stdout);
+   free(strings); 
 }
+
+// (dleoni) Insert a new item in the position given as first argument
+static void insertMutex(struct DataItem **position, pthread_mutex_t *address, long contention) {
+   struct DataItem *next, *item;
+   item = (struct DataItem*) malloc(sizeof(struct DataItem));
+   item->mutex_contention = contention;
+   item->acquisitions = 1; 
+   item->mutex_address = address;
+   item->next = NULL;
+   item->backtrace_printed = false;
+
+   // insert the new element
+   *position = item;
+}
+
+// (dleoni) Search for the item in the table corresponding to the given address of the mutex: if found, return the corresponding DataItem structure, otherwise return NULL and set the index where the new element should be put
+
+static struct DataItem** searchMutex(pthread_mutex_t *address, bool *create_new_item, unsigned int *key) {
+   
+   struct DataItem *next, *mutex, *preceding;
+   //get the key for this address
+   unsigned int index = ((((long long)address) % 1000003) % MAX_NUMBER_MUTEXES);
+   *key = index;
+
+   //if no item corresponds to the key, return the pointer to the corresponding position within the array
+   mutex = hashArray[index];
+   if(mutex == NULL) {
+      *create_new_item = true;
+      return &hashArray[index];
+   }
+
+   //there's an item: check for the one in the bucket corresponding to the address
+   if(mutex->mutex_address == address) {
+      return &mutex;
+   }
+   
+   next = mutex->next;
+   preceding = mutex;
+  
+   //check the right item in the bucket
+   while((next != NULL) && (next->mutex_address != address)) {
+      preceding = next;
+      next = next->next;
+   }
+
+   //check if found: if not, it has to be added
+   if(next == NULL) {
+      *create_new_item = true;
+      number_of_collisions += 1;
+      return &preceding->next;
+   }
+
+   
+   //return the address of the DataItem structure
+   return &next;
+}
+
 
 #ifndef lll_lock_elision
 #define lll_lock_elision(lock, try_lock, private)	({ \
@@ -132,8 +157,12 @@ static int __pthread_mutex_lock_full (pthread_mutex_t *mutex)
 
 int
 __pthread_mutex_lock (mutex)
-     pthread_mutex_t *mutex;
+      pthread_mutex_t *mutex;
 {
+  struct timespec start, stop;
+  struct rusage resource_start, resource_stop;
+  bool insert_new_mutex = false;
+  unsigned int key;
   assert (sizeof (mutex->__size) >= sizeof (mutex->__data));
 
   unsigned int type = PTHREAD_MUTEX_TYPE_ELISION (mutex);
@@ -149,19 +178,41 @@ __pthread_mutex_lock (mutex)
       FORCE_ELISION (mutex, goto elision);
     simple:
       /* Normal mutex.  */
-      printf("CUSTOM MUTEX\n");
-      fflush(stdout);
-      struct timespec start, stop;
-      clock_gettime( CLOCK_REALTIME, &start);
-      LLL_MUTEX_LOCK (mutex);
-      clock_gettime( CLOCK_REALTIME, &stop);
-      double mutex_acquisition = ((stop.tv_sec - start.tv_sec) + (stop.tv_nsec - start.tv_nsec) / 1000000000L) * 1000000L;
-      int index = searchMutex(mutex);
-      if(index == -1) {
-         insertMutex(mutex, mutex_acquisition);
+      if (!measure_mutexes_contention) {
+        LLL_MUTEX_LOCK (mutex);
       }
       else {
-         hashArray[index]->mutex_contention += mutex_acquisition;
+        getrusage(RUSAGE_THREAD, &resource_start);
+        clock_gettime( CLOCK_MONOTONIC, &start);
+        LLL_MUTEX_LOCK (mutex);
+        clock_gettime( CLOCK_MONOTONIC, &stop);
+        getrusage(RUSAGE_THREAD, &resource_stop);
+        long mutex_after = ((long)stop.tv_sec) * 1000000000 + (long) stop.tv_nsec;
+        long mutex_before = ((long)start.tv_sec) * 1000000000 + (long) start.tv_nsec;
+        long mutex_acquisition = mutex_after - mutex_before;
+        long resource_after = ((long)resource_stop.ru_utime.tv_sec) * 1000000 + (long) resource_stop.ru_utime.tv_usec;
+        long resource_before = ((long)resource_start.ru_utime.tv_sec) * 1000000 + (long) resource_start.ru_utime.tv_usec;
+        long resource_nsec_delta = (resource_after - resource_after) * 4 * 1000;
+        //printf("Difference:%ld\n", mutex_acquisition - resource_nsec_delta);
+        //fflush(stdout); 
+        
+        struct DataItem **mutex_position = searchMutex(mutex, &insert_new_mutex, &key);
+        if(insert_new_mutex) {
+           // (dleoni) create a new entry for the mutex
+           insertMutex(mutex_position, mutex, mutex_acquisition);
+        }
+        else {
+           struct DataItem *mutex_element = *mutex_position;
+           // (dleoni) update the counters for the mutex
+           mutex_element->mutex_contention += mutex_acquisition;
+           mutex_element->acquisitions += 1;
+           if(((mutex_element->mutex_contention / mutex_element->acquisitions)> 10000) && !(mutex_element->backtrace_printed)) {
+              getBacktrace();
+              mutex_element->backtrace_printed = true;
+              printf("TOP CONTENDED:%ld ADDRESS:%p Index:%d\n", mutex_element->mutex_contention, mutex_element->mutex_address, key);
+              fflush(stdout);
+           }
+        }
       }
       assert (mutex->__data.__owner == 0);
     }

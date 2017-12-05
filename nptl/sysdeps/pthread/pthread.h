@@ -420,6 +420,12 @@ extern int pthread_attr_getaffinity_np (const pthread_attr_t *__attr,
 extern int pthread_getattr_default_np (pthread_attr_t *__attr)
      __THROW __nonnull ((1));
 
+// (dleoni) Expose function to print most contended mutexes
+extern void pthread_print_mutexes(void);
+
+// (dleoni) Expose function to start measuring contention of mutexes
+extern void pthread_measure_mutexes_contention(void);
+
 /* Set the default attributes to be used by pthread_create in this
    process.  */
 extern int pthread_setattr_default_np (const pthread_attr_t *__attr)

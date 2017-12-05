@@ -159,8 +159,32 @@ enum
 #define FUTEX_TID_MASK		0x3fffffff
 
 
-/* Internal variables.  */
+// (dleoni) Expose data structures to print most contended mutexes
+#ifndef MAX_NUMBER_MUTEXES
+#define MAX_NUMBER_MUTEXES 1000000
+#endif
 
+// (dleoni) The structure representing an element in the table
+// key: address of the mutex
+// data: 1- total time to acquire the mutex (in nanoseconds)
+//       2- boolean indicating whether the backtrace has been printed once
+//	 3- number of times the mutex has been acquired (used to measure the average contention
+//       4- pointer to next element in the bucket (NULL if doesn't exist)
+
+struct DataItem {
+   long mutex_contention;
+   pthread_mutex_t *mutex_address;
+   bool backtrace_printed;
+   long acquisitions;
+   struct DataItem *next;
+};
+extern struct DataItem* hashArray[MAX_NUMBER_MUTEXES];
+extern int number_of_collisions;
+
+// (dleoni) If this boolean variable is set to true, the contention of mutexes is tracked
+extern bool measure_mutexes_contention;
+
+/* Internal variables.  */
 
 /* Default pthread attributes.  */
 extern struct pthread_attr __default_pthread_attr attribute_hidden;

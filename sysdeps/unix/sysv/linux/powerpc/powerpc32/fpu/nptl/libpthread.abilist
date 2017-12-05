@@ -178,6 +178,8 @@ GLIBC_2.18
  GLIBC_2.18 A
  pthread_getattr_default_np F
  pthread_setattr_default_np F
+ pthread_print_mutexes F
+ pthread_measure_mutexes_contention F
 GLIBC_2.2
  GLIBC_2.2 A
  __open64 F
